@@ -20,10 +20,19 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Check JavaScript syntax
         run: node --check agent.js
 
       - name: Run WebSafe Research AI
-        run: node agent.js "${{ inputs.website }}"
+        run: |
+          node agent.js "${{ inputs.website }}" | tee report.txt
+
+          {
+            echo "## 🛡️ WebSafe Research AI"
+            echo
+            echo '```text'
+            cat report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
