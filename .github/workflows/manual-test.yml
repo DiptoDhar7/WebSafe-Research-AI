@@ -1,13 +1,16 @@
-name: WebSafe Research AI Test
+name: WebSafe Manual Research
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      website:
+        description: "Website URL to research"
+        required: true
+        default: "https://example.com"
+        type: string
 
 jobs:
-  test:
+  research:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,4 +26,4 @@ jobs:
         run: node --check agent.js
 
       - name: Run WebSafe Research AI
-        run: node agent.js https://example.com
+        run: node agent.js "${{ inputs.website }}"
