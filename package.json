@@ -1,0 +1,12 @@
+{
+  "name": "websafe-research-ai",
+  "version": "1.0.0",
+  "description": "AI-powered website safety research and risk analysis tool.",
+  "main": "agent.js",
+  "scripts": {
+    "start": "node agent.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
