@@ -1,8 +1,8 @@
 # 🛡️ WebSafe Research AI
 
-### AI-Powered Website Safety Research & Risk Analysis
+### AI-Assisted Website Safety Research & Risk Analysis
 
-WebSafe Research AI is an AI-powered research tool designed to analyze publicly observable website signals and provide a clear, structured safety assessment.
+WebSafe Research AI is an AI-Assisted research tool designed to analyze publicly observable website signals and provide a clear, structured safety assessment.
 
 It helps users understand potential security and trust-related indicators before browsing, creating an account, sharing personal information, or making a payment.
 
@@ -112,9 +112,17 @@ Results may change over time. Verify important information yourself.
 🚫 Unauthorized Access: DISABLED
 
 ```
+# 📌 Project Status
+
+**Active Prototype / Research Project**
+
+WebSafe Research AI is being developed incrementally through real-world testing, evidence analysis, and iterative improvements.
+
+The project demonstrates practical AI-assisted development, automated web research, risk analysis, and evidence-based reasoning.
+
 # 👨‍💻 Developer
 
-Dipto Dhar
+**Dipto Dhar**
 
 **AI Builder & Developer**
 
