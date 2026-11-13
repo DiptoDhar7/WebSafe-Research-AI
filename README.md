@@ -110,9 +110,11 @@ Results may change over time. Verify important information yourself.
 🚫 Hacking: DISABLED
 🚫 Exploitation: DISABLED
 🚫 Unauthorized Access: DISABLED
-## 👨‍💻 Developer
 
-### Dipto Dhar
+```
+# 👨‍💻 Developer
+
+Dipto Dhar
 
 **AI Builder & Developer**
 
