@@ -1,793 +1,802 @@
-'use strict';
+const https = require("https");
+const http = require("http");
+const dns = require("dns").promises;
 
-/*
- * WebSafe Research AI — V3
- * Public / Passive Website Research Only
- *
- * V3 goals:
- * - Stronger evidence-based risk scoring
- * - Dynamic activity detection
- * - Website identity intelligence
- * - Financial / Crypto detection
- * - Gambling detection
- * - Adult-content detection
- * - Commerce / payment detection
- * - Download / APK detection
- * - Dynamic trust reasoning
- * - Deterministic results
- */
+/* =========================================================
+   WebSafe Research AI — Final V3
+   Public / Passive Website Research Only
+========================================================= */
 
-const http = require('http');
-const https = require('https');
-const dns = require('dns').promises;
-const { URL } = require('url');
+const input = process.argv[2] || "https://example.com";
+
+const MAX_REDIRECTS = 5;
+const REQUEST_TIMEOUT = 8000;
+const MAX_BODY = 30000;
 
 const USER_AGENT =
-  'WebSafe-Research-AI/3.0 (Public Passive Research)';
+  "WebSafe-Research-AI/3.0 (public-research-only)";
 
-const REQUEST_TIMEOUT = 8000;
-const MAX_REDIRECTS = 5;
-const MAX_BODY_SIZE = 120000;
-
-const SECURITY_HEADERS = [
-  ['HSTS', 'strict-transport-security'],
-  ['CSP', 'content-security-policy'],
-  ['X-Content-Type-Options', 'x-content-type-options'],
-  ['X-Frame-Options', 'x-frame-options'],
-  ['Referrer-Policy', 'referrer-policy'],
-  ['Permissions-Policy', 'permissions-policy']
-];
-
-/* ---------------------------------------------------------
+/* =========================================================
    BASIC HELPERS
---------------------------------------------------------- */
+========================================================= */
 
-function normalizeUrl(input) {
-  let value = String(input || '').trim();
+function normalizeUrl(value) {
+  const raw = String(value || "").trim();
 
-  if (!value) {
-    throw new Error('Website URL is required.');
+  if (!raw) {
+    throw new Error("No website URL was provided.");
   }
 
-  if (!/^https?:\/\//i.test(value)) {
-    value = 'https://' + value;
-  }
-
-  const parsed = new URL(value);
-
-  if (!['http:', 'https:'].includes(parsed.protocol)) {
-    throw new Error('Only HTTP and HTTPS websites are supported.');
-  }
-
-  return parsed.toString();
+  return /^https?:\/\//i.test(raw)
+    ? raw
+    : "https://" + raw;
 }
 
-function safeHost(url) {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return 'unknown';
-  }
-}
-
-function truncate(value, max = 500) {
-  const text = String(value || '').replace(/\s+/g, ' ').trim();
-
-  if (text.length <= max) {
-    return text;
-  }
-
-  return text.slice(0, max - 3) + '...';
-}
-
-function escapeHtmlEntities(text) {
-  return String(text || '')
-    .replace(/&amp;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>');
-}
-
-function stripHtml(html) {
-  return String(html || '')
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
-    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function cleanText(text) {
-  return escapeHtmlEntities(
-    String(text || '')
-      .replace(/\s+/g, ' ')
-      .trim()
+function isIpAddress(hostname) {
+  return (
+    /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) ||
+    hostname.includes(":")
   );
 }
 
+function unique(values) {
+  return [...new Set(values)];
+}
+
 function containsAny(text, patterns) {
-  const value = String(text || '').toLowerCase();
+  const value = String(text || "").toLowerCase();
 
-  return patterns.some(pattern => {
-    if (pattern instanceof RegExp) {
-      return pattern.test(value);
-    }
-
-    return value.includes(String(pattern).toLowerCase());
-  });
+  return patterns.some(pattern =>
+    value.includes(String(pattern).toLowerCase())
+  );
 }
 
 function countMatches(text, patterns) {
-  const value = String(text || '').toLowerCase();
-  let count = 0;
+  const value = String(text || "").toLowerCase();
 
-  for (const pattern of patterns) {
-    if (pattern instanceof RegExp) {
-      const flags = pattern.flags.includes('g')
-        ? pattern.flags
-        : pattern.flags + 'g';
-
-      const regex = new RegExp(pattern.source, flags);
-      const matches = value.match(regex);
-
-      if (matches) {
-        count += matches.length;
-      }
-    } else {
-      const needle = String(pattern).toLowerCase();
-
-      if (needle && value.includes(needle)) {
-        count += 1;
-      }
-    }
-  }
-
-  return count;
+  return patterns.reduce((count, pattern) => {
+    const matches = value.match(pattern);
+    return count + (matches ? matches.length : 0);
+  }, 0);
 }
 
-function unique(values) {
-  return [...new Set(
-    values
-      .filter(Boolean)
-      .map(value => String(value).trim())
-      .filter(Boolean)
-  )];
+function stripHtml(html) {
+  return String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-/* ---------------------------------------------------------
-   HTTP / HTTPS RESEARCH
---------------------------------------------------------- */
+/* =========================================================
+   HTTP / HTTPS REQUEST
+========================================================= */
 
-function requestPage(url, redirectsLeft = MAX_REDIRECTS) {
+function requestOnce(targetUrl) {
   return new Promise((resolve, reject) => {
-    let parsed;
+    let parsedUrl;
 
     try {
-      parsed = new URL(url);
+      parsedUrl = new URL(targetUrl);
     } catch {
-      reject(new Error('Invalid URL.'));
+      reject(new Error("Invalid website URL."));
       return;
     }
 
-    const transport = parsed.protocol === 'https:' ? https : http;
+    if (
+      parsedUrl.protocol !== "https:" &&
+      parsedUrl.protocol !== "http:"
+    ) {
+      reject(
+        new Error(
+          "Only HTTP and HTTPS websites are supported."
+        )
+      );
+      return;
+    }
 
-    const options = {
-      protocol: parsed.protocol,
-      hostname: parsed.hostname,
-      port: parsed.port || undefined,
-      path: parsed.pathname + parsed.search,
-      method: 'GET',
-      headers: {
-        'User-Agent': USER_AGENT,
-        'Accept': 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.8'
+    const client =
+      parsedUrl.protocol === "https:"
+        ? https
+        : http;
+
+    const request = client.get(
+      targetUrl,
+      {
+        timeout: REQUEST_TIMEOUT,
+
+        headers: {
+          "User-Agent": USER_AGENT,
+          Accept:
+            "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+          "Accept-Language":
+            "en-US,en;q=0.8"
+        }
       },
-      timeout: REQUEST_TIMEOUT
-    };
 
-    const req = transport.request(options, res => {
-      const chunks = [];
-      let total = 0;
+      response => {
+        const headers = {};
 
-      res.on('data', chunk => {
-        total += chunk.length;
-
-        if (total <= MAX_BODY_SIZE) {
-          chunks.push(chunk);
+        for (const [key, value] of Object.entries(
+          response.headers
+        )) {
+          headers[key.toLowerCase()] = value;
         }
-      });
 
-      res.on('end', () => {
-        const body = Buffer.concat(chunks).toString('utf8');
+        let location = null;
 
-        const location = res.headers.location;
-
-        if (
-          location &&
-          [301, 302, 303, 307, 308].includes(res.statusCode) &&
-          redirectsLeft > 0
-        ) {
-          let nextUrl;
-
+        if (headers.location) {
           try {
-            nextUrl = new URL(location, url).toString();
+            location = new URL(
+              headers.location,
+              targetUrl
+            ).href;
           } catch {
-            nextUrl = null;
-          }
-
-          if (nextUrl) {
-            requestPage(nextUrl, redirectsLeft - 1)
-              .then(result => {
-                resolve({
-                  ...result,
-                  redirects: [
-                    {
-                      from: url,
-                      to: nextUrl,
-                      status: res.statusCode
-                    },
-                    ...(result.redirects || [])
-                  ]
-                });
-              })
-              .catch(reject);
-
-            return;
+            location = null;
           }
         }
 
-        resolve({
-          requestedUrl: url,
-          finalUrl: url,
-          statusCode: res.statusCode || 0,
-          headers: res.headers || {},
-          body,
-          redirects: [],
-          socket: req.socket
+        const socket = response.socket;
+
+        const tls =
+          socket && socket.encrypted
+            ? {
+                protocol:
+                  typeof socket.getProtocol ===
+                  "function"
+                    ? socket.getProtocol()
+                    : null,
+
+                authorized:
+                  typeof socket.authorized ===
+                  "boolean"
+                    ? socket.authorized
+                    : null,
+
+                authorizationError:
+                  socket.authorizationError || null,
+
+                certificate:
+                  typeof socket.getPeerCertificate ===
+                  "function"
+                    ? socket.getPeerCertificate()
+                    : null
+              }
+            : null;
+
+        let body = "";
+
+        response.setEncoding("utf8");
+
+        response.on("data", chunk => {
+          if (body.length < MAX_BODY) {
+            body += chunk.slice(
+              0,
+              MAX_BODY - body.length
+            );
+          }
         });
-      });
+
+        response.on("end", () => {
+          resolve({
+            targetUrl,
+            statusCode: response.statusCode || 0,
+            headers,
+            location,
+            body,
+            tls
+          });
+        });
+
+        response.on("error", reject);
+      }
+    );
+
+    request.on("timeout", () => {
+      request.destroy(
+        new Error("Website request timed out.")
+      );
     });
 
-    req.on('timeout', () => {
-      req.destroy(new Error('Request timed out.'));
-    });
-
-    req.on('error', reject);
-
-    req.end();
+    request.on("error", reject);
   });
 }
 
-/* ---------------------------------------------------------
-   TLS INFORMATION
---------------------------------------------------------- */
+/* =========================================================
+   REDIRECT ANALYSIS
+========================================================= */
 
-function getTlsInfo(response) {
-  const socket = response && response.socket;
+async function followRedirects(startUrl) {
+  const chain = [];
 
-  if (!socket || typeof socket.getPeerCertificate !== 'function') {
+  let currentUrl = startUrl;
+
+  for (
+    let attempt = 0;
+    attempt <= MAX_REDIRECTS;
+    attempt++
+  ) {
+    const result =
+      await requestOnce(currentUrl);
+
+    chain.push({
+      url: currentUrl,
+      statusCode: result.statusCode,
+      location: result.location
+    });
+
+    const isRedirect =
+      result.statusCode >= 300 &&
+      result.statusCode < 400;
+
+    if (
+      isRedirect &&
+      result.location
+    ) {
+      if (attempt === MAX_REDIRECTS) {
+        return {
+          final: result,
+          chain,
+          redirectLimit: true
+        };
+      }
+
+      currentUrl = result.location;
+      continue;
+    }
+
     return {
-      available: false,
-      verified: false,
-      protocol: null,
-      authorizationError: null,
-      certificate: null
+      final: result,
+      chain,
+      redirectLimit: false
     };
   }
 
-  const certificate = socket.getPeerCertificate(true);
-
-  return {
-    available: true,
-    verified: socket.authorized === true,
-    protocol:
-      typeof socket.getProtocol === 'function'
-        ? socket.getProtocol()
-        : null,
-    authorizationError: socket.authorizationError || null,
-    certificate: certificate && Object.keys(certificate).length
-      ? certificate
-      : null
-  };
+  throw new Error(
+    "Redirect analysis failed."
+  );
 }
-
-/* ---------------------------------------------------------
-   SECURITY HEADERS
---------------------------------------------------------- */
-
-function analyzeSecurityHeaders(headers) {
-  const normalized = {};
-
-  for (const [key, value] of Object.entries(headers || {})) {
-    normalized[String(key).toLowerCase()] = value;
-  }
-
-  const results = [];
-  let present = 0;
-
-  for (const [label, header] of SECURITY_HEADERS) {
-    const exists = Boolean(normalized[header]);
-
-    if (exists) {
-      present += 1;
-    }
-
-    results.push({
-      label,
-      header,
-      present,
-      value: exists ? truncate(normalized[header], 180) : null
-    });
-  }
-
-  return {
-    present,
-    total: SECURITY_HEADERS.length,
-    results
-  };
-}
-
-/* ---------------------------------------------------------
-   DOMAIN SIGNALS
---------------------------------------------------------- */
+/* =========================================================
+   DOMAIN & SECURITY ANALYSIS
+========================================================= */
 
 function analyzeDomain(url) {
-  const hostname = safeHost(url);
-  const lower = hostname.toLowerCase();
+  const parsed = new URL(url);
+  const hostname = parsed.hostname.toLowerCase();
 
-  const isIp =
-    /^(?:\d{1,3}\.){3}\d{1,3}$/.test(lower) ||
-    lower.includes(':');
+  const labels = hostname.split(".").filter(Boolean);
 
-  const signals = [];
+  const warnings = [];
 
-  if (isIp) {
-    signals.push('IP address used instead of a normal domain');
+  if (isIpAddress(hostname)) {
+    warnings.push("IP address used instead of a normal domain");
   }
 
-  if (lower.includes('xn--')) {
-    signals.push('Punycode hostname detected');
+  if (hostname.includes("xn--")) {
+    warnings.push("Punycode hostname detected");
   }
 
-  if (lower.length > 45) {
-    signals.push('Unusually long hostname');
+  if (hostname.length > 60) {
+    warnings.push("Unusually long hostname");
   }
 
-  const hyphenCount = (lower.match(/-/g) || []).length;
+  const hyphenCount =
+    (hostname.match(/-/g) || []).length;
 
-  if (hyphenCount >= 4) {
-    signals.push('Many hyphens in hostname');
+  if (hyphenCount >= 3) {
+    warnings.push("Multiple hyphens in hostname");
   }
-
-  const labels = lower.split('.').filter(Boolean);
 
   if (labels.length >= 5) {
-    signals.push('Deep subdomain structure');
+    warnings.push("Deep subdomain structure");
   }
 
   const cautionTlds = [
-    '.zip',
-    '.mov',
-    '.click',
-    '.top',
-    '.work',
-    '.download'
+    ".zip",
+    ".mov",
+    ".click",
+    ".top",
+    ".xyz",
+    ".shop",
+    ".work",
+    ".buzz",
+    ".country"
   ];
 
-  if (cautionTlds.some(tld => lower.endsWith(tld))) {
-    signals.push('Caution-listed TLD');
+  const cautionTld = cautionTlds.find(tld =>
+    hostname.endsWith(tld)
+  );
+
+  if (cautionTld) {
+    warnings.push(
+      `Caution TLD detected: ${cautionTld}`
+    );
   }
 
   return {
     hostname,
-    isIp,
-    labels,
-    signals,
-    warning: signals.length > 0
+    isIp: isIpAddress(hostname),
+    punycode: hostname.includes("xn--"),
+    hostnameLength: hostname.length,
+    labelCount: labels.length,
+    warnings
   };
 }
 
-/* ---------------------------------------------------------
-   HTML METADATA
---------------------------------------------------------- */
 
-function extractMeta(html) {
-  const source = String(html || '');
+/* =========================================================
+   SECURITY HEADER ANALYSIS
+========================================================= */
 
-  const titleMatch = source.match(
-    /<title\b[^>]*>([\s\S]*?)<\/title>/i
-  );
+function analyzeSecurityHeaders(headers) {
+  const checks = {
+    "Strict-Transport-Security":
+      "strict-transport-security",
 
-  const descriptionMatch = source.match(
-    /<meta\b[^>]*name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i
-  ) || source.match(
-    /<meta\b[^>]*content=["']([^"']*)["'][^>]*name=["']description["'][^>]*>/i
-  );
+    "Content-Security-Policy":
+      "content-security-policy",
 
-  const ogTitleMatch = source.match(
-    /<meta\b[^>]*property=["']og:title["'][^>]*content=["']([^"']*)["'][^>]*>/i
-  ) || source.match(
-    /<meta\b[^>]*content=["']([^"']*)["'][^>]*property=["']og:title["'][^>]*>/i
-  );
+    "X-Content-Type-Options":
+      "x-content-type-options",
 
-  const ogDescriptionMatch = source.match(
-    /<meta\b[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["'][^>]*>/i
-  ) || source.match(
-    /<meta\b[^>]*content=["']([^"']*)["'][^>]*property=["']og:description["'][^>]*>/i
-  );
+    "X-Frame-Options":
+      "x-frame-options",
 
-  const title = cleanText(
-    titleMatch ? titleMatch[1] : ''
-  );
+    "Referrer-Policy":
+      "referrer-policy",
 
-  const description = cleanText(
-    descriptionMatch ? descriptionMatch[1] : ''
-  );
+    "Permissions-Policy":
+      "permissions-policy"
+  };
 
-  const ogTitle = cleanText(
-    ogTitleMatch ? ogTitleMatch[1] : ''
-  );
+  const results = {};
 
-  const ogDescription = cleanText(
-    ogDescriptionMatch ? ogDescriptionMatch[1] : ''
-  );
+  let present = 0;
+
+  for (const [name, header] of Object.entries(checks)) {
+    const value = headers[header];
+
+    const exists =
+      value !== undefined &&
+      value !== null &&
+      String(value).trim() !== "";
+
+    results[name] = {
+      present: exists,
+      value: exists ? String(value) : null
+    };
+
+    if (exists) {
+      present++;
+    }
+  }
 
   return {
-    title: truncate(title, 300),
-    description: truncate(description, 700),
-    ogTitle: truncate(ogTitle, 300),
-    ogDescription: truncate(ogDescription, 700)
+    results,
+    present,
+    total: Object.keys(checks).length
   };
-  }
-/* ---------------------------------------------------------
+}
+
+
+/* =========================================================
+   HTML META / WEBSITE IDENTITY
+========================================================= */
+
+function decodeHtmlEntities(value) {
+  return String(value || "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractMeta(html) {
+  const source = String(html || "");
+
+  const titleMatch =
+    source.match(
+      /<title[^>]*>([\s\S]*?)<\/title>/i
+    );
+
+  const descriptionMatch =
+    source.match(
+      /<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i
+    ) ||
+    source.match(
+      /<meta[^>]+content=["']([^"']*)["'][^>]+name=["']description["']/i
+    );
+
+  const ogTitleMatch =
+    source.match(
+      /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']*)["']/i
+    ) ||
+    source.match(
+      /<meta[^>]+content=["']([^"']*)["'][^>]+property=["']og:title["']/i
+    );
+
+  const ogDescriptionMatch =
+    source.match(
+      /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']*)["']/i
+    ) ||
+    source.match(
+      /<meta[^>]+content=["']([^"']*)["'][^>]+property=["']og:description["']/i
+    );
+
+  const languageMatch =
+    source.match(
+      /<html[^>]+lang=["']([^"']+)["']/i
+    );
+
+  return {
+    title: decodeHtmlEntities(
+      titleMatch ? titleMatch[1] : ""
+    ),
+
+    description: decodeHtmlEntities(
+      descriptionMatch
+        ? descriptionMatch[1]
+        : ""
+    ),
+
+    ogTitle: decodeHtmlEntities(
+      ogTitleMatch
+        ? ogTitleMatch[1]
+        : ""
+    ),
+
+    ogDescription: decodeHtmlEntities(
+      ogDescriptionMatch
+        ? ogDescriptionMatch[1]
+        : ""
+    ),
+
+    language:
+      languageMatch
+        ? languageMatch[1].trim()
+        : null
+  };
+}
+
+
+/* =========================================================
    PAGE INTELLIGENCE
---------------------------------------------------------- */
+========================================================= */
 
-function analyzePage(body, meta, finalUrl) {
-  const html = String(body || '');
-  const visibleText = stripHtml(html);
+function analyzePage(body, finalUrl) {
+  const html = String(body || "");
 
-  /*
-   * Metadata is included because important website activity
-   * may appear in title or description.
-   */
-  const identityText = [
+  const meta = extractMeta(html);
+
+  const visibleText =
+    stripHtml(html).toLowerCase();
+
+  const searchableText = [
+    visibleText,
     meta.title,
     meta.description,
     meta.ogTitle,
-    meta.ogDescription,
-    visibleText
-  ].join(' ');
-
-  const text = identityText.toLowerCase();
+    meta.ogDescription
+  ]
+    .join(" ")
+    .toLowerCase();
 
   const signals = {
-    login: containsAny(text, [
-      'login',
-      'log in',
-      'sign in',
-      'signin',
-      'create account',
-      'my account',
-      'register'
+    login: containsAny(searchableText, [
+      "login",
+      "log in",
+      "sign in",
+      "signin",
+      "create account",
+      "my account"
     ]),
 
-    payment: containsAny(text, [
-      'payment',
-      'pay now',
-      'checkout',
-      'billing',
-      'credit card',
-      'debit card',
-      'paypal',
-      'stripe',
-      'deposit',
-      'withdraw'
+    payment: containsAny(searchableText, [
+      "payment",
+      "checkout",
+      "credit card",
+      "debit card",
+      "pay now",
+      "billing",
+      "visa",
+      "mastercard"
     ]),
 
-    download: containsAny(text, [
-      'download',
-      'download now',
-      'apk',
-      'android app',
-      'install app',
-      'software download'
+    download: containsAny(searchableText, [
+      "download",
+      "apk",
+      "installer",
+      "download app"
     ]),
 
-    adult: containsAny(text, [
-      '18+',
-      '18 plus',
-      'adult content',
-      'adult video',
-      'adult videos',
-      'porn',
-      'pornography',
-      'nsfw',
-      'xxx'
+    adult: containsAny(searchableText, [
+      "adult",
+      "porn",
+      "xxx",
+      "18+",
+      "nsfw",
+      "explicit content",
+      "onlyfans"
     ]),
 
-    gambling: containsAny(text, [
-      'casino',
-      'online casino',
-      'gambling',
-      'betting',
-      'sports betting',
-      'bet now',
-      'slot games',
-      'roulette',
-      'blackjack',
-      'poker'
+    gambling: containsAny(searchableText, [
+      "casino",
+      "betting",
+      "sportsbook",
+      "gambling",
+      "bet now",
+      "slot",
+      "roulette",
+      "poker"
     ]),
 
-    highPressure: containsAny(text, [
-      'act now',
-      'limited time',
-      'urgent',
-      'guaranteed profit',
-      'guaranteed return',
-      'risk free',
-      'risk-free',
-      'double your money',
-      '100% profit',
-      'last chance'
+    crypto: containsAny(searchableText, [
+      "crypto",
+      "cryptocurrency",
+      "token",
+      "tokens",
+      "bitcoin",
+      "ethereum",
+      "blockchain",
+      "wallet",
+      "web3",
+      "coin"
     ]),
 
-    contact: containsAny(text, [
-      'contact us',
-      'contact',
-      'support',
-      'customer support',
-      'help center'
+    trading: containsAny(searchableText, [
+      "trade",
+      "trading",
+      "exchange",
+      "buy crypto",
+      "sell crypto",
+      "swap"
     ]),
 
-    privacy: containsAny(text, [
-      'privacy policy',
-      'privacy',
-      'terms of service',
-      'terms and conditions',
-      'cookie policy'
+    investment: containsAny(searchableText, [
+      "investment",
+      "invest now",
+      "guaranteed return",
+      "profit",
+      "roi",
+      "passive income"
     ]),
 
-    crypto: containsAny(text, [
-      'cryptocurrency',
-      'crypto',
-      'bitcoin',
-      'ethereum',
-      'token',
-      'tokens',
-      'blockchain',
-      'web3',
-      'defi',
-      'nft',
-      'wallet',
-      'connect wallet',
-      'crypto wallet',
-      'coin launch',
-      'launch coin',
-      'project token',
-      'project tokens'
+    shopping: containsAny(searchableText, [
+      "shop",
+      "shopping",
+      "product",
+      "products",
+      "add to cart",
+      "cart",
+      "store"
     ]),
 
-    trading: containsAny(text, [
-      'trade crypto',
-      'crypto trading',
-      'token trading',
-      'trading platform',
-      'trade tokens',
-      'buy tokens',
-      'sell tokens',
-      'exchange',
-      'swap tokens',
-      'swap crypto'
+    highPressure: containsAny(searchableText, [
+      "act now",
+      "limited time",
+      "urgent",
+      "last chance",
+      "don't miss",
+      "expires today",
+      "claim now"
     ]),
 
-    investment: containsAny(text, [
-      'investment',
-      'invest now',
-      'invest today',
-      'earn daily',
-      'passive income',
-      'investment return',
-      'roi',
-      'high return',
-      'profit guarantee',
-      'guaranteed returns'
+    contact: containsAny(searchableText, [
+      "contact us",
+      "contact",
+      "support",
+      "customer service",
+      "help center"
     ]),
 
-    commerce: containsAny(text, [
-      'shop',
-      'shopping',
-      'store',
-      'products',
-      'product',
-      'buy now',
-      'add to cart',
-      'cart',
-      'checkout',
-      'order now'
+    privacy: containsAny(searchableText, [
+      "privacy policy",
+      "privacy"
+    ]),
+
+    terms: containsAny(searchableText, [
+      "terms of service",
+      "terms and conditions",
+      "terms of use"
     ])
   };
 
-  const externalDomains = extractExternalDomains(
-    html,
-    finalUrl
-  );
+  const externalDomains = [];
 
-  const detected = [];
+  const linkPattern =
+    /(?:href|src)=["'](https?:\/\/[^"'#\s]+)/gi;
 
-  if (
-    signals.crypto ||
-    signals.trading ||
-    signals.investment
+  let match;
+
+  while (
+    (match = linkPattern.exec(html)) !== null
   ) {
-    detected.push('financial');
-  }
+    try {
+      const externalUrl =
+        new URL(match[1]);
 
-  if (signals.gambling) {
-    detected.push('gambling');
-  }
+      const finalHost =
+        new URL(finalUrl).hostname;
 
-  if (signals.adult) {
-    detected.push('adult');
-  }
-
-  if (
-    signals.commerce ||
-    signals.payment
-  ) {
-    detected.push('commerce');
-  }
-
-  if (signals.download) {
-    detected.push('download');
+      if (
+        externalUrl.hostname &&
+        externalUrl.hostname !== finalHost
+      ) {
+        externalDomains.push(
+          externalUrl.hostname
+        );
+      }
+    } catch {
+      // Ignore malformed external URLs.
+    }
   }
 
   return {
     meta,
-    visibleTextLength: visibleText.length,
+
+    textLength: visibleText.length,
+
     signals,
-    detectedCategories: unique(detected),
-    externalDomains
+
+    externalDomains:
+      unique(externalDomains).slice(0, 30)
   };
 }
-/* ---------------------------------------------------------
-   EXTERNAL DOMAIN ANALYSIS
---------------------------------------------------------- */
 
-function extractExternalDomains(html, finalUrl) {
-  const source = String(html || '');
-  const domains = [];
 
-  let baseHost = '';
+/* =========================================================
+   WEBSITE CATEGORY DETECTION
+========================================================= */
 
-  try {
-    baseHost = new URL(finalUrl).hostname.toLowerCase();
-  } catch {
-    return [];
-  }
+function detectCategories(page) {
+  const s = page.signals;
 
-  const regex = /(?:href|src)=["']([^"']+)["']/gi;
-  let match;
+  const categories = {
+    financial:
+      Boolean(
+        s.crypto ||
+        s.trading ||
+        s.investment
+      ),
 
-  while ((match = regex.exec(source)) !== null) {
-    const raw = match[1];
+    adult:
+      Boolean(s.adult),
 
-    try {
-      const absolute = new URL(raw, finalUrl);
-      const host = absolute.hostname.toLowerCase();
+    gambling:
+      Boolean(s.gambling),
 
-      if (
-        host &&
-        host !== baseHost &&
-        !host.endsWith('.' + baseHost)
-      ) {
-        domains.push(host);
-      }
-    } catch {
-      // Ignore malformed URLs.
-    }
+    commerce:
+      Boolean(
+        s.shopping ||
+        s.payment
+      )
+  };
 
-    if (domains.length >= 40) {
-      break;
-    }
-  }
-
-  return unique(domains);
+  return categories;
 }
+/* =========================================================
+   ADVERTISEMENT & POPUP INTELLIGENCE
+========================================================= */
 
-/* ---------------------------------------------------------
-   ADVERTISEMENT INTELLIGENCE
---------------------------------------------------------- */
+function analyzeAds(body, externalDomains) {
+  const html = String(body || "");
+  const text = stripHtml(html).toLowerCase();
 
-function analyzeAds(body, finalUrl) {
-  const html = String(body || '');
-  const lower = html.toLowerCase();
-
-  const adNetworks = [
-    'googlesyndication.com',
-    'doubleclick.net',
-    'googleadservices.com',
-    'adsbygoogle',
-    'adsterra.com',
-    'propellerads.com',
-    'popads.net',
-    'adskeeper.com',
-    'taboola.com',
-    'outbrain.com'
+  const adNetworkPatterns = [
+    "googlesyndication.com",
+    "doubleclick.net",
+    "googleadservices.com",
+    "adservice.google.com",
+    "amazon-adsystem.com",
+    "adnxs.com",
+    "adsbygoogle",
+    "propellerads",
+    "popads",
+    "adsterra",
+    "exoclick",
+    "trafficjunky"
   ];
 
-  const detectedNetworks = adNetworks.filter(
-    network => lower.includes(network)
-  );
-
-  const adClassSignals = [
-    'class="ad"',
-    "class='ad'",
-    'class="ads"',
-    "class='ads'",
-    'class="advert',
-    "class='advert",
-    'id="ad-',
-    "id='ad-",
-    'id="ads-',
-    "id='ads-",
-    'banner-ad',
-    'advertisement'
+  const adMarkerPatterns = [
+    "advertisement",
+    "advertising",
+    "sponsored",
+    "ads by google",
+    "adchoices",
+    "banner ad"
   ];
 
-  const adMarkers = countMatches(
-    html,
-    adClassSignals
-  );
+  const popupPatterns = [
+    "popup",
+    "pop-up",
+    "popunder",
+    "pop-under",
+    "window.open("
+  ];
 
-  const popupSignals = containsAny(lower, [
-    'window.open(',
-    'popunder',
-    'popup',
-    'onclick="window.open',
-    "onclick='window.open"
-  ]);
+  const suspiciousPatterns = [
+    "click here to win",
+    "you are a winner",
+    "claim your prize",
+    "congratulations",
+    "virus detected",
+    "your device is infected",
+    "install now",
+    "download now"
+  ];
 
-  const forcedRedirectSignals = containsAny(lower, [
-    'location.href',
-    'window.location',
-    'location.replace',
-    'meta http-equiv="refresh"'
-  ]);
+  const detectedAdNetworks =
+    externalDomains.filter(domain =>
+      adNetworkPatterns.some(pattern =>
+        domain.toLowerCase().includes(pattern)
+      )
+    );
 
-  const suspiciousAdWords = containsAny(lower, [
-    'you are the lucky winner',
-    'claim your prize',
-    'virus detected',
-    'your device is infected',
-    'click to remove virus',
-    'congratulations you won'
-  ]);
+  const adMarkers =
+    adMarkerPatterns.filter(pattern =>
+      text.includes(pattern)
+    );
 
-  const excessive =
-    adMarkers >= 12 ||
-    detectedNetworks.length >= 4;
+  const popupSignals =
+    popupPatterns.filter(pattern =>
+      html.toLowerCase().includes(pattern)
+    );
+
+  const suspiciousSignals =
+    suspiciousPatterns.filter(pattern =>
+      text.includes(pattern)
+    );
+
+  const adDetected =
+    detectedAdNetworks.length > 0 ||
+    adMarkers.length > 0;
+
+  const popupDetected =
+    popupSignals.length > 0;
+
+  const suspiciousDetected =
+    suspiciousSignals.length > 0;
+
+  const excessiveAds =
+    detectedAdNetworks.length >= 3 ||
+    adMarkers.length >= 4;
 
   return {
-    detected:
-      detectedNetworks.length > 0 ||
-      adMarkers > 0,
+    detected: adDetected,
+    detectedAdNetworks:
+      unique(detectedAdNetworks),
 
-    networks: detectedNetworks,
-    adMarkers,
-    popupSignals,
-    forcedRedirectSignals,
-    excessive,
-    suspiciousAdWords
+    adMarkers:
+      unique(adMarkers),
+
+    popupDetected,
+
+    popupSignals:
+      unique(popupSignals),
+
+    excessiveAds,
+
+    suspiciousDetected,
+
+    suspiciousSignals:
+      unique(suspiciousSignals)
   };
 }
 
-/* ---------------------------------------------------------
-   DNS RESEARCH
---------------------------------------------------------- */
+
+/* =========================================================
+   DNS ANALYSIS
+========================================================= */
 
 async function resolveDns(hostname) {
   const result = {
@@ -798,114 +807,43 @@ async function resolveDns(hostname) {
   };
 
   const tasks = [
-    ['A', dns.resolve4(hostname)],
-    ['AAAA', dns.resolve6(hostname)],
-    ['MX', dns.resolveMx(hostname)],
-    ['NS', dns.resolveNs(hostname)]
+    ["A", dns.resolve4(hostname)],
+    ["AAAA", dns.resolve6(hostname)],
+    ["MX", dns.resolveMx(hostname)],
+    ["NS", dns.resolveNs(hostname)]
   ];
 
-  const settled = await Promise.allSettled(
-    tasks.map(task => task[1])
-  );
+  const settled =
+    await Promise.allSettled(
+      tasks.map(item => item[1])
+    );
 
-  for (let i = 0; i < tasks.length; i += 1) {
-    const [type] = tasks[i];
-    const item = settled[i];
+  for (let i = 0; i < tasks.length; i++) {
+    const type = tasks[i][0];
+    const response = settled[i];
 
-    if (item.status === 'fulfilled') {
-      result[type] = item.value;
+    if (response.status !== "fulfilled") {
+      continue;
+    }
+
+    if (type === "MX") {
+      result.MX =
+        response.value
+          .map(item => item.exchange)
+          .filter(Boolean);
+    } else {
+      result[type] =
+        response.value || [];
     }
   }
 
   return result;
 }
 
-/* ---------------------------------------------------------
-   RDAP PUBLIC DOMAIN RESEARCH
---------------------------------------------------------- */
 
-async function fetchJson(url) {
-  return new Promise((resolve, reject) => {
-    let parsed;
-
-    try {
-      parsed = new URL(url);
-    } catch {
-      reject(new Error('Invalid JSON URL.'));
-      return;
-    }
-
-    const req = https.get(
-      {
-        hostname: parsed.hostname,
-        path: parsed.pathname + parsed.search,
-        headers: {
-          'User-Agent': USER_AGENT,
-          Accept: 'application/rdap+json, application/json'
-        },
-        timeout: REQUEST_TIMEOUT
-      },
-      res => {
-        const chunks = [];
-
-        res.on('data', chunk => {
-          chunks.push(chunk);
-        });
-
-        res.on('end', () => {
-          const raw = Buffer.concat(chunks).toString('utf8');
-
-          if (
-            res.statusCode < 200 ||
-            res.statusCode >= 300
-          ) {
-            reject(
-              new Error(`HTTP ${res.statusCode}`)
-            );
-            return;
-          }
-
-          try {
-            resolve(JSON.parse(raw));
-          } catch {
-            reject(new Error('Invalid JSON response.'));
-          }
-        });
-      }
-    );
-
-    req.on('timeout', () => {
-      req.destroy(
-        new Error('RDAP request timed out.')
-      );
-          });
-
-    req.on('error', reject);
-
-    req.end();
-  });
-}
-
-async function getRdap(hostname) {
-  try {
-    const data = await fetchJson(
-      `https://rdap.org/domain/${encodeURIComponent(hostname)}`
-    );
-
-    return {
-      available: true,
-      data
-    };
-  } catch {
-    return {
-      available: false,
-      data: null
-    };
-  }
-}
-/* ---------------------------------------------------------
-   CERTIFICATE INFORMATION
---------------------------------------------------------- */
+/* =========================================================
+   TLS CERTIFICATE ANALYSIS
+========================================================= */
 
 function analyzeCertificate(tls) {
   if (!tls || !tls.certificate) {
@@ -914,1117 +852,1587 @@ function analyzeCertificate(tls) {
       subject: null,
       issuer: null,
       validFrom: null,
-      validTo: null
+      validTo: null,
+      subjectAltName: null,
+      fingerprint256: null
     };
   }
 
-  const certificate = tls.certificate;
-
-  const subject =
-    certificate.subject &&
-    (certificate.subject.CN ||
-      certificate.subject.commonName);
-
-  const issuer =
-    certificate.issuer &&
-    (certificate.issuer.CN ||
-      certificate.issuer.commonName);
+  const certificate =
+    tls.certificate;
 
   return {
     available: true,
-    subject: subject || null,
-    issuer: issuer || null,
-    validFrom: certificate.valid_from || null,
-    validTo: certificate.valid_to || null
+
+    subject:
+      certificate.subject
+        ? (
+            certificate.subject.CN ||
+            certificate.subject.commonName ||
+            null
+          )
+        : null,
+
+    issuer:
+      certificate.issuer
+        ? (
+            certificate.issuer.CN ||
+            certificate.issuer.commonName ||
+            null
+          )
+        : null,
+
+    validFrom:
+      certificate.valid_from || null,
+
+    validTo:
+      certificate.valid_to || null,
+
+    subjectAltName:
+      certificate.subjectaltname || null,
+
+    fingerprint256:
+      certificate.fingerprint256 || null
   };
 }
 
-/* ---------------------------------------------------------
-   RISK ENGINE
---------------------------------------------------------- */
 
-function calculateRisk({
-  url,
-  response,
-  tls,
-  security,
-  domain,
-  page,
-  ads,
-  dnsInfo,
-  rdap
-}) {
+/* =========================================================
+   RDAP / PUBLIC DOMAIN EVIDENCE
+========================================================= */
+
+function getRdap(hostname) {
+  return new Promise(resolve => {
+    const url =
+      `https://rdap.org/domain/${encodeURIComponent(
+        hostname
+      )}`;
+
+    const request =
+      https.get(
+        url,
+        {
+          timeout: REQUEST_TIMEOUT,
+
+          headers: {
+            "User-Agent": USER_AGENT,
+            Accept:
+              "application/rdap+json, application/json"
+          }
+        },
+
+        response => {
+          let body = "";
+
+          response.setEncoding("utf8");
+
+          response.on("data", chunk => {
+            if (body.length < 20000) {
+              body += chunk.slice(
+                0,
+                20000 - body.length
+              );
+            }
+          });
+
+          response.on("end", () => {
+            if (
+              response.statusCode < 200 ||
+              response.statusCode >= 300
+            ) {
+              resolve({
+                available: false,
+                statusCode:
+                  response.statusCode || 0
+              });
+              return;
+            }
+
+            try {
+              const data =
+                JSON.parse(body);
+
+              const events =
+                Array.isArray(data.events)
+                  ? data.events
+                  : [];
+
+              const registration =
+                events.find(
+                  event =>
+                    event.eventAction ===
+                    "registration"
+                );
+
+              const expiration =
+                events.find(
+                  event =>
+                    event.eventAction ===
+                    "expiration"
+                );
+
+              let registrar = null;
+
+              if (
+                Array.isArray(data.entities)
+              ) {
+                const entity =
+                  data.entities.find(
+                    item =>
+                      Array.isArray(
+                        item.roles
+                      ) &&
+                      item.roles.includes(
+                        "registrar"
+                      )
+                  );
+
+                if (
+                  entity &&
+                  entity.vcardArray &&
+                  Array.isArray(
+                    entity.vcardArray[1]
+                  )
+                ) {
+                  const fn =
+                    entity.vcardArray[1].find(
+                      item =>
+                        item[0] === "fn"
+                    );
+
+                  if (fn && fn[3]) {
+                    registrar =
+                      String(fn[3]);
+                  }
+                }
+              }
+
+              resolve({
+                available: true,
+
+                statusCode:
+                  response.statusCode,
+
+                registration:
+                  registration
+                    ? registration.eventDate
+                    : null,
+
+                expiration:
+                  expiration
+                    ? expiration.eventDate
+                    : null,
+
+                registrar
+              });
+            } catch {
+              resolve({
+                available: false,
+                statusCode:
+                  response.statusCode
+              });
+            }
+          });
+
+          response.on("error", () => {
+            resolve({
+              available: false,
+              statusCode: 0
+            });
+          });
+        }
+      );
+
+    request.on("timeout", () => {
+      request.destroy();
+    });
+
+    request.on("error", () => {
+      resolve({
+        available: false,
+        statusCode: 0
+      });
+    });
+  });
+}
+
+
+/* =========================================================
+   WEBSITE INFRASTRUCTURE SIGNALS
+========================================================= */
+
+function analyzeInfrastructure(headers, externalDomains) {
+  const server =
+    String(
+      headers["server"] || ""
+    ).toLowerCase();
+
+  const poweredBy =
+    String(
+      headers["x-powered-by"] || ""
+    ).toLowerCase();
+
+  const cdnSignals = [];
+
+  if (
+    server.includes("cloudflare") ||
+    headers["cf-ray"] ||
+    headers["cf-cache-status"]
+  ) {
+    cdnSignals.push("Cloudflare");
+  }
+
+  if (
+    server.includes("cloudfront") ||
+    headers["x-amz-cf-id"]
+  ) {
+    cdnSignals.push("Amazon CloudFront");
+  }
+
+  if (
+    server.includes("fastly") ||
+    headers["x-served-by"]
+  ) {
+    cdnSignals.push("Fastly");
+  }
+
+  const analyticsDomains =
+    externalDomains.filter(domain =>
+      containsAny(domain, [
+        "google-analytics",
+        "googletagmanager",
+        "analytics",
+        "segment.io",
+        "hotjar",
+        "clarity.ms"
+      ])
+    );
+
+  const paymentDomains =
+    externalDomains.filter(domain =>
+      containsAny(domain, [
+        "stripe",
+        "paypal",
+        "braintree",
+        "checkout.com",
+        "razorpay",
+        "paystack"
+      ])
+    );
+
+  return {
+    server:
+      server || null,
+
+    poweredBy:
+      poweredBy || null,
+
+    cdn:
+      unique(cdnSignals),
+
+    analytics:
+      unique(analyticsDomains),
+
+    paymentServices:
+      unique(paymentDomains)
+  };
+              }
+/* =========================================================
+   RISK ENGINE
+========================================================= */
+
+function calculateRisk(data) {
   let score = 0;
   const reasons = [];
-  const positives = [];
 
-  /*
-   * Technical security
-   */
+  const {
+    initialUrl,
+    finalUrl,
+    finalResponse,
+    domain,
+    headers,
+    page,
+    ads,
+    certificate,
+    rdap,
+    redirectChain
+  } = data;
 
-  if (url.startsWith('https://')) {
-    score -= 4;
-    positives.push('HTTPS is enabled.');
-  } else {
-    score += 18;
+  /* -------------------------------------------------------
+     HTTPS / CONNECTION
+  ------------------------------------------------------- */
+
+  const finalParsed =
+    new URL(finalUrl);
+
+  if (finalParsed.protocol !== "https:") {
+    score += 20;
     reasons.push(
-      'The website does not use HTTPS.'
+      "The final website connection is not using HTTPS."
+    );
+  } else {
+    reasons.push(
+      "The final website uses HTTPS."
     );
   }
 
-  if (tls.available) {
-    if (tls.verified) {
-      score -= 3;
-      positives.push(
-        'TLS certificate verification succeeded.'
-      );
-    } else {
-      score += 25;
-      reasons.push(
-        'TLS certificate verification failed.'
-      );
-    }
-  }
+  /* -------------------------------------------------------
+     HTTP STATUS
+  ------------------------------------------------------- */
 
-  if (
-    response &&
-    response.statusCode >= 400
-  ) {
-    score += 12;
+  const status =
+    finalResponse.statusCode;
+
+  if (status >= 400) {
+    score += 15;
+
     reasons.push(
-      `The website returned HTTP ${response.statusCode}.`
+      `The website returned HTTP ${status}.`
     );
   } else if (
-    response &&
-    response.statusCode >= 200 &&
-    response.statusCode < 400
+    status >= 200 &&
+    status < 400
   ) {
-    positives.push(
-      `The website returned HTTP ${response.statusCode}.`
+    reasons.push(
+      `The website returned HTTP ${status}.`
     );
   }
 
-  if (
-    response &&
-    response.redirects.length >= 3
-  ) {
+  /* -------------------------------------------------------
+     REDIRECTS
+  ------------------------------------------------------- */
+
+  const redirectCount =
+    Math.max(
+      0,
+      redirectChain.length - 1
+    );
+
+  if (redirectCount >= 4) {
     score += 12;
+
     reasons.push(
-      `Multiple redirects were observed (${response.redirects.length}).`
+      `A high number of redirects was observed (${redirectCount}).`
     );
-  } else if (
-    response &&
-    response.redirects.length === 0
-  ) {
-    positives.push(
-      'No redirects were observed.'
+  } else if (redirectCount > 0) {
+    reasons.push(
+      `The website used ${redirectCount} redirect${
+        redirectCount === 1 ? "" : "s"
+      }.`
     );
-  }
-
-  /*
-   * Domain signals
-   */
-
-  if (domain.signals.length > 0) {
-    score += Math.min(
-      domain.signals.length * 7,
-      28
-    );
-
-    for (const signal of domain.signals) {
-      reasons.push(signal + '.');
-    }
   } else {
-    positives.push(
-      'No basic domain-structure warning indicators were observed.'
+    reasons.push(
+      "No redirects were observed."
     );
   }
 
-  /*
-   * Security headers
-   */
+  /* -------------------------------------------------------
+     REDIRECT LIMIT
+  ------------------------------------------------------- */
 
-  const missingHeaders =
-    security.total - security.present;
-
-  if (missingHeaders >= 5) {
-    score += 8;
-  } else if (missingHeaders >= 3) {
-    score += 5;
-  } else if (missingHeaders === 0) {
-    score -= 3;
-
-    positives.push(
-      'All checked security headers were present.'
-    );
-  }
-
-  /*
-   * Financial / crypto
-   */
-
-  if (page.signals.crypto) {
-    score += 9;
+  if (data.redirectLimit) {
+    score += 20;
 
     reasons.push(
-      'Crypto or token-related activity was detected.'
+      "The redirect chain reached the analysis limit."
     );
   }
 
-  if (page.signals.trading) {
-    score += 7;
+  /* -------------------------------------------------------
+     DOMAIN SIGNALS
+  ------------------------------------------------------- */
+
+  if (domain.isIp) {
+    score += 12;
 
     reasons.push(
-      'Trading-related activity was detected.'
+      "The website uses an IP address instead of a normal domain."
     );
   }
 
-  if (page.signals.investment) {
+  if (domain.punycode) {
     score += 10;
 
     reasons.push(
-      'Investment or return-related claims were detected.'
+      "Punycode was detected in the hostname."
     );
   }
 
-  if (page.signals.highPressure) {
-    score += 12;
+  if (domain.warnings.length > 0) {
+    score += Math.min(
+      domain.warnings.length * 3,
+      12
+    );
 
     reasons.push(
-      'High-pressure or unusually strong promotional language was detected.'
+      "Basic domain-structure warning indicators were observed."
+    );
+  } else {
+    reasons.push(
+      "No obvious basic domain-structure warning indicators were observed."
     );
   }
 
-  /*
-   * Gambling
-   */
+  /* -------------------------------------------------------
+     TLS
+  ------------------------------------------------------- */
 
-  if (page.signals.gambling) {
+  if (
+    finalParsed.protocol === "https:" &&
+    finalResponse.tls
+  ) {
+    if (
+      finalResponse.tls.authorized === false
+    ) {
+      score += 25;
+
+      reasons.push(
+        "TLS certificate verification did not succeed."
+      );
+    } else if (
+      finalResponse.tls.authorized === true
+    ) {
+      reasons.push(
+        "TLS certificate verification succeeded."
+      );
+    }
+
+    if (
+      finalResponse.tls.protocol &&
+      /^TLSv1\.0|^TLSv1\.1/i.test(
+        finalResponse.tls.protocol
+      )
+    ) {
+      score += 15;
+
+      reasons.push(
+        `An older TLS protocol was reported: ${finalResponse.tls.protocol}.`
+      );
+    }
+  }
+
+  /* -------------------------------------------------------
+     CERTIFICATE
+  ------------------------------------------------------- */
+
+  if (
+    certificate.available
+  ) {
+    const now =
+      Date.now();
+
+    const validFrom =
+      certificate.validFrom
+        ? Date.parse(
+            certificate.validFrom
+          )
+        : NaN;
+
+    const validTo =
+      certificate.validTo
+        ? Date.parse(
+            certificate.validTo
+          )
+        : NaN;
+
+    if (
+      Number.isFinite(validFrom) &&
+      now < validFrom
+    ) {
+      score += 20;
+
+      reasons.push(
+        "The TLS certificate is not yet valid."
+      );
+    }
+
+    if (
+      Number.isFinite(validTo) &&
+      now > validTo
+    ) {
+      score += 25;
+
+      reasons.push(
+        "The TLS certificate appears to be expired."
+      );
+    }
+
+    if (
+      Number.isFinite(validTo) &&
+      validTo > now &&
+      validTo - now < 7 * 24 * 60 * 60 * 1000
+    ) {
+      score += 2;
+
+      reasons.push(
+        "The TLS certificate is close to its expiration date."
+      );
+    }
+  }
+
+  /* -------------------------------------------------------
+     SECURITY HEADERS
+  ------------------------------------------------------- */
+
+  const headerCount =
+    headers.present;
+
+  if (headerCount === 0) {
     score += 8;
 
     reasons.push(
-      'Gambling or betting activity was detected.'
+      "None of the six checked security headers were observed."
     );
-  }
-
-  /*
-   * Adult content is contextual.
-   * It is not automatically treated as fraud.
-   */
-
-  if (page.signals.adult) {
-    score += 1;
-  }
-
-  /*
-   * Commerce / payment
-   */
-
-  if (page.signals.payment) {
-    score += 5;
+  } else if (
+    headerCount <= 2
+  ) {
+    score += 4;
 
     reasons.push(
-      'Payment or checkout-related activity was detected.'
+      `Only ${headerCount}/6 checked security headers were observed.`
+    );
+  } else {
+    reasons.push(
+      `${headerCount}/6 checked security headers were observed.`
     );
   }
 
-  /*
-   * Downloads
-   */
+  /* -------------------------------------------------------
+     CONTENT SIGNALS
+  ------------------------------------------------------- */
 
-  if (page.signals.download) {
+  if (
+    page.signals.highPressure
+  ) {
+    score += 6;
+
+    reasons.push(
+      "High-pressure or urgency language was detected."
+    );
+  }
+
+  /* -------------------------------------------------------
+     AD / POPUP BEHAVIOR
+  ------------------------------------------------------- */
+
+  if (
+    ads.suspiciousDetected
+  ) {
+    score += 12;
+
+    reasons.push(
+      "Suspicious advertising or warning-style content signals were detected."
+    );
+  }
+
+  if (
+    ads.popupDetected
+  ) {
     score += 3;
+
+    reasons.push(
+      "Popup or pop-under related signals were detected."
+    );
   }
 
-  /*
-   * Advertising
-   */
-
-  if (ads.popupSignals) {
+  if (
+    ads.excessiveAds
+  ) {
     score += 4;
 
     reasons.push(
-      'Popup or popunder signals were detected.'
+      "A relatively high number of advertising signals was detected."
     );
   }
 
-  if (ads.forcedRedirectSignals) {
-    score += 8;
-
-    reasons.push(
-      'Client-side redirect signals were detected.'
-    );
-  }
-
-  if (ads.suspiciousAdWords) {
-    score += 12;
-
-    reasons.push(
-      'Suspicious scareware or prize-style advertising language was detected.'
-    );
-  }
-
-  if (ads.excessive) {
-    score += 4;
-
-    reasons.push(
-      'A high level of advertising markers was detected.'
-    );
-  }
-
-  /*
-   * Public evidence availability
-   */
-
-  if (rdap.available) {
-    positives.push(
-      'Public RDAP domain information was available.'
-    );
-  }
-
-  if (
-    dnsInfo.A.length === 0 &&
-    dnsInfo.AAAA.length === 0
-  ) {
-    score += 5;
-
-    reasons.push(
-      'No public A or AAAA DNS record was resolved.'
-    );
-  }
-
-  /*
-   * Deterministic bounded score.
-   */
-
-  score = Math.max(
-    0,
-    Math.min(100, Math.round(score))
-  );
-
-  let risk;
-
-  if (score <= 19) {
-    risk = 'LOW';
-  } else if (score <= 39) {
-    risk = 'LOW-MODERATE';
-  } else if (score <= 59) {
-    risk = 'MEDIUM';
-  } else if (score <= 79) {
-    risk = 'HIGH';
-  } else {
-    risk = 'VERY HIGH';
-  }
-
-  /*
-   * Confidence is evidence coverage,
-   * NOT a safety percentage.
-   */
-
-  let confidence = 55;
-
-  if (response) confidence += 8;
-  if (tls.available) confidence += 7;
-  if (security.present >= 3) confidence += 4;
-  if (page.meta.title) confidence += 4;
-  if (page.meta.description) confidence += 4;
-
-  if (
-    dnsInfo.A.length ||
-    dnsInfo.AAAA.length
-  ) {
-    confidence += 4;
-  }
-
-  if (dnsInfo.NS.length) {
-    confidence += 3;
-  }
-
-  if (rdap.available) {
-    confidence += 5;
-  }
-
-  if (page.visibleTextLength > 500) {
-    confidence += 3;
-  }
-
-  confidence = Math.max(
-    50,
-    Math.min(97, confidence)
-  );
-
-  return {
-    score,
-    risk,
-    confidence,
-    reasons: unique(reasons),
-    positives: unique(positives)
-  };
-      }
-
-/* ---------------------------------------------------------
-   DYNAMIC CATEGORY REPORTS
---------------------------------------------------------- */
-
-function buildFinancialSection(page) {
-  const s = page.signals;
-
-  if (
-    !s.crypto &&
-    !s.trading &&
-    !s.investment &&
-    !s.payment
-  ) {
-    return '';
-  }
-
-  const lines = [];
-
-  lines.push('');
-  lines.push('💰 FINANCIAL ACTIVITY');
-  lines.push('');
-
-  if (s.crypto) {
-    lines.push('• Crypto/Token: ⚠️ DETECTED');
-  } else {
-    lines.push('• Crypto/Token: ❓ NOT DETECTED');
-  }
-
-  if (s.trading) {
-    lines.push('• Trading: ⚠️ DETECTED');
-  } else {
-    lines.push('• Trading: ❓ NOT DETECTED');
-  }
-
-  if (s.investment) {
-    lines.push('• Investment Claims: ⚠️ DETECTED');
-  } else {
-    lines.push('• Investment Claims: ❓ NOT VERIFIED');
-  }
-
-  if (s.payment) {
-    lines.push('• Payment Activity: ⚠️ DETECTED');
-  } else {
-    lines.push('• Payment Activity: ❓ NOT VERIFIED');
-  }
-
-  lines.push('');
-  lines.push('⚠️ NOTE');
-  lines.push(
-    'Financial activity does not by itself prove fraud.'
-  );
-  lines.push(
-    'Verify the service, operators and transaction terms'
-  );
-  lines.push(
-    'before sending money or connecting a wallet.'
-  );
-
-  return lines.join('\n');
-}
-
-function buildGamblingSection(page) {
-  const s = page.signals;
-
-  if (!s.gambling) {
-    return '';
-  }
-
-  const lines = [
-    '',
-    '🎰 GAMBLING ACTIVITY',
-    '',
-    '• Gambling: ⚠️ DETECTED',
-    '• Betting: ⚠️ DETECTED'
-  ];
-
-  if (s.payment) {
-    lines.push(
-      '• Payment/Deposit: ⚠️ DETECTED'
-    );
-  } else {
-    lines.push(
-      '• Payment/Deposit: ❓ NOT VERIFIED'
-    );
-  }
-
-  lines.push('');
-  lines.push('⚠️ NOTE');
-  lines.push(
-    'Gambling activity does not by itself prove fraud.'
-  );
-  lines.push(
-    'Check licensing, operator identity and payment terms'
-  );
-  lines.push(
-    'before depositing money.'
-  );
-
-  return lines.join('\n');
-}
-
-function buildAdultSection(page) {
-  if (!page.signals.adult) {
-    return '';
-  }
-
-  return [
-    '',
-    '🔞 CONTENT CATEGORY',
-    '',
-    '• Adult Content: ⚠️ DETECTED',
-    '• Age Restriction: ⚠️ PRESENT',
-    '',
-    '⚠️ NOTE',
-    'Adult content was detected from public page signals.',
-    'This category alone does not indicate that the website'
-    + ' is fraudulent or technically unsafe.'
-  ].join('\n');
-}
-
-/* ---------------------------------------------------------
-   COMMERCE / DOWNLOAD / CATEGORY HELPERS
---------------------------------------------------------- */
-
-function buildCommerceSection(page) {
-  const s = page.signals;
-
-  if (!s.commerce && !s.payment) {
-    return '';
-  }
-
-  const lines = [
-    '',
-    '🛒 COMMERCE ACTIVITY',
-    ''
-  ];
-
-  if (s.commerce) {
-    lines.push(
-      '• Products/Shopping: ⚠️ DETECTED'
-    );
-  } else {
-    lines.push(
-      '• Products/Shopping: ❓ NOT DETECTED'
-    );
-  }
-
-  if (s.payment) {
-    lines.push(
-      '• Checkout/Payment: ⚠️ DETECTED'
-    );
-  } else {
-    lines.push(
-      '• Checkout/Payment: ❓ NOT VERIFIED'
-    );
-  }
-
-  lines.push('');
-  lines.push('⚠️ NOTE');
-  lines.push(
-    'Shopping or payment activity does not by itself'
-  );
-  lines.push(
-    'prove that a website is fraudulent.'
-  );
-  lines.push(
-    'Verify the seller, product details and payment terms'
-  );
-  lines.push(
-    'before making a purchase.'
-  );
-
-  return lines.join('\n');
-}
-
-function buildDownloadSection(page) {
-  if (!page.signals.download) {
-    return '';
-  }
-
-  return [
-    '',
-    '📥 DOWNLOAD ACTIVITY',
-    '',
-    '• Download/App Signals: ⚠️ DETECTED',
-    '',
-    '⚠️ NOTE',
-    'A downloadable file or app-related signal was found.',
-    'Verify the source and file before downloading or installing.'
-  ].join('\n');
-}
-
-/* ---------------------------------------------------------
-   CONTENT SIGNAL SUMMARY
---------------------------------------------------------- */
-
-function buildContentSection(page) {
-  const s = page.signals;
-  const detected = [];
-
-  if (s.login) {
-    detected.push('Login/Account');
-  }
-
-  if (s.payment) {
-    detected.push('Payment');
-  }
-
-  if (s.contact) {
-    detected.push('Contact/Support');
-  }
-
-  if (s.privacy) {
-    detected.push('Privacy/Terms');
-  }
-
-  if (s.highPressure) {
-    detected.push('High-Pressure Language');
-  }
-
-  if (detected.length === 0) {
-    return [
-      '',
-      '📄 PAGE CONTENT SIGNALS',
-      '• ℹ️ No major checked content signal detected.'
-    ].join('\n');
-  }
-
-  return [
-    '',
-    '📄 PAGE CONTENT SIGNALS',
-    ...detected.map(
-      item => `• ⚠️ ${item}: DETECTED`
-    )
-  ].join('\n');
-}
-
-/* ---------------------------------------------------------
-   IDENTITY CLASSIFICATION
---------------------------------------------------------- */
-
-function classifyWebsite(page, finalUrl) {
-  const text = [
-    page.meta.title,
-    page.meta.description,
-    page.meta.ogTitle,
-    page.meta.ogDescription
-  ]
-    .join(' ')
-    .toLowerCase();
+  /* -------------------------------------------------------
+     IMPORTANT:
+     CATEGORY ACTIVITY IS NOT AUTOMATICALLY FRAUD
+  ------------------------------------------------------- */
 
   if (
     page.signals.crypto ||
     page.signals.trading ||
     page.signals.investment
   ) {
-    return 'Financial / Crypto-related website';
-  }
-
-  if (page.signals.gambling) {
-    return 'Gambling / Betting-related website';
-  }
-
-  if (page.signals.adult) {
-    return 'Adult-content website';
-  }
-
-  if (
-    page.signals.commerce ||
-    page.signals.payment
-  ) {
-    return 'Commerce / Shopping-related website';
-  }
-
-  if (page.signals.download) {
-    return 'Download / Software-related website';
-  }
-
-  if (
-    text.includes('github') ||
-    text.includes('open source') ||
-    text.includes('developer') ||
-    text.includes('repository')
-  ) {
-    return 'Developer / Technology-related website';
-  }
-
-  if (
-    page.signals.login ||
-    page.signals.contact ||
-    page.signals.privacy
-  ) {
-    return 'General web service / information website';
-  }
-
-  try {
-    const hostname = new URL(finalUrl).hostname;
-
-    return `General website (${hostname})`;
-  } catch {
-    return 'General website';
-  }
-}
-
-/* ---------------------------------------------------------
-   TRUST REASONING
---------------------------------------------------------- */
-
-function buildTrustReasoning(result) {
-  const lines = [
-    '',
-    '🧠 TRUST REASONING'
-  ];
-
-  const reasons = result.reasons || [];
-  const positives = result.positives || [];
-
-  for (const item of positives.slice(0, 5)) {
-    lines.push(`• ${item}`);
-  }
-
-  for (const item of reasons.slice(0, 8)) {
-    lines.push(`• ⚠️ ${item}`);
-  }
-
-  if (
-    positives.length === 0 &&
-    reasons.length === 0
-  ) {
-    lines.push(
-      '• Limited public evidence was available in this run.'
+    reasons.push(
+      "Financial or crypto-related activity was detected; this alone does not prove fraud."
     );
   }
 
-  lines.push('');
-  lines.push(
-    'The assessment is based on the public evidence'
-  );
-  lines.push(
-    'observed during this research run.'
-  );
-
-  return lines.join('\n');
-  }
-
-/* ---------------------------------------------------------
-   USER GUIDANCE
---------------------------------------------------------- */
-
-function buildUserGuidance(page, risk) {
-  let browsing = '🟢 Generally OK';
-  let personalData = '🟢 Normal Caution';
-  let account = '🟢 Verify Normally';
-  let payment = '🟢 Verify Normally';
-
-  if (risk.score >= 20) {
-    browsing = '🟡 Use Caution';
-    personalData = '🟡 Verify First';
-    account = '🟡 Verify Carefully';
-  }
-
-  if (risk.score >= 40) {
-    browsing = '🟠 Proceed Carefully';
-    personalData = '🟠 Avoid Unnecessary Sharing';
-    account = '🟠 Verify Before Using';
-  }
-
-  if (risk.score >= 60) {
-    browsing = '🔴 High Caution';
-    personalData = '🔴 Avoid Sharing Sensitive Data';
-    account = '🔴 Avoid Unless Verified';
+  if (
+    page.signals.adult
+  ) {
+    reasons.push(
+      "Adult-content signals were detected."
+    );
   }
 
   if (
-    page.signals.payment ||
-    page.signals.crypto ||
-    page.signals.trading ||
-    page.signals.investment ||
     page.signals.gambling
   ) {
-    payment = '🟠 Verify Before Paying';
-  }
-
-  return [
-    '',
-    '👤 USER GUIDANCE',
-    `Browsing: ${browsing}`,
-    `Personal Data: ${personalData}`,
-    `Account: ${account}`,
-    `Payment: ${payment}`
-  ].join('\n');
-}
-
-/* ---------------------------------------------------------
-   SECURITY HEADER REPORT
---------------------------------------------------------- */
-
-function buildSecurityHeaderSection(security) {
-  const headers = security.headers || {};
-
-  const names = [
-    ['HSTS', 'strict-transport-security'],
-    ['CSP', 'content-security-policy'],
-    [
-      'X-Content-Type-Options',
-      'x-content-type-options'
-    ],
-    ['X-Frame-Options', 'x-frame-options'],
-    ['Referrer-Policy', 'referrer-policy'],
-    ['Permissions-Policy', 'permissions-policy']
-  ];
-
-  const lines = [
-    '',
-    '🛡️ SECURITY HEADERS'
-  ];
-
-  for (const [label, key] of names) {
-    if (headers[key]) {
-      lines.push(`  • ${label}: ✅ Present`);
-    } else {
-      lines.push(`  • ${label}: ❌ Missing`);
-    }
-  }
-
-  return lines.join('\n');
-}
-
-/* ---------------------------------------------------------
-   DOMAIN & DNS REPORT
---------------------------------------------------------- */
-
-function buildDnsSection(domain, dnsInfo, rdap) {
-  const lines = [
-    '',
-    '🌍 DOMAIN & DNS',
-    `• Hostname: ${domain.hostname}`,
-    `• A: ${
-      dnsInfo.A.length
-        ? dnsInfo.A.join(', ')
-        : '❓ Not available'
-    }`,
-    `• AAAA: ${
-      dnsInfo.AAAA.length
-        ? dnsInfo.AAAA.join(', ')
-        : '❓ Not available'
-    }`,
-    `• MX: ${
-      dnsInfo.MX.length
-        ? dnsInfo.MX
-            .map(item => item.exchange || item)
-            .join(', ')
-        : '❓ Not available'
-    }`,
-    `• NS: ${
-      dnsInfo.NS.length
-        ? dnsInfo.NS.join(', ')
-        : '❓ Not available'
-    }`,
-    `• RDAP: ${
-      rdap.available
-        ? '✅ AVAILABLE'
-        : '❓ NOT AVAILABLE'
-    }`
-  ];
-
-  return lines.join('\n');
-}
-
-/* ---------------------------------------------------------
-   CERTIFICATE REPORT
---------------------------------------------------------- */
-
-function buildCertificateSection(certificate) {
-  if (!certificate.available) {
-    return [
-      '',
-      '🔐 CERTIFICATE',
-      '• ℹ️ Certificate details not available.'
-    ].join('\n');
-  }
-
-  return [
-    '',
-    '🔐 CERTIFICATE',
-    `• Subject: ${
-      certificate.subject || 'Unknown'
-    }`,
-    `• Issuer: ${
-      certificate.issuer || 'Unknown'
-    }`,
-    `• Valid From: ${
-      certificate.validFrom || 'Unknown'
-    }`,
-    `• Valid To: ${
-      certificate.validTo || 'Unknown'
-    }`
-  ].join('\n');
-}
-
-/* ---------------------------------------------------------
-   ADVERTISEMENT REPORT
---------------------------------------------------------- */
-
-function buildAdSection(ads) {
-  const lines = [
-    '',
-    '📢 AD & POPUP ANALYSIS',
-    `• Advertisements: ${
-      ads.detected
-        ? '⚠️ DETECTED'
-        : '✅ NOT DETECTED'
-    }`,
-    `• Popup Signals: ${
-      ads.popupSignals
-        ? '⚠️ DETECTED'
-        : '✅ NOT DETECTED'
-    }`,
-    `• Excessive Ads: ${
-      ads.excessive
-        ? '⚠️ DETECTED'
-        : '✅ NOT DETECTED'
-    }`,
-    `• Suspicious Ad/Content Signals: ${
-      ads.suspiciousAdWords
-        ? '⚠️ DETECTED'
-        : '✅ NOT DETECTED'
-    }`
-  ];
-
-  if (ads.networks.length > 0) {
-    lines.push(
-      `• Ad Networks: ${ads.networks.join(', ')}`
+    reasons.push(
+      "Gambling or betting signals were detected."
     );
   }
 
-  return lines.join('\n');
+  /* -------------------------------------------------------
+     RDAP
+  ------------------------------------------------------- */
+
+  if (
+    rdap &&
+    !rdap.available
+  ) {
+    reasons.push(
+      "Public RDAP domain information was not available in this run."
+    );
+  } else if (
+    rdap &&
+    rdap.available
+  ) {
+    reasons.push(
+      "Public RDAP domain information was available."
+    );
+  }
+
+  /* -------------------------------------------------------
+     FINAL SCORE
+  ------------------------------------------------------- */
+
+  score =
+    Math.max(
+      0,
+      Math.min(
+        100,
+        Math.round(score)
+      )
+    );
+
+  let risk = "LOW";
+
+  if (score >= 55) {
+    risk = "HIGH";
+  } else if (score >= 25) {
+    risk = "MEDIUM";
+  }
+
+  /* -------------------------------------------------------
+     CONFIDENCE
+  ------------------------------------------------------- */
+
+  let confidence = 70;
+
+  if (finalResponse.statusCode) {
+    confidence += 5;
+  }
+
+  if (finalResponse.tls) {
+    confidence += 5;
+  }
+
+  if (certificate.available) {
+    confidence += 5;
+  }
+
+  if (
+    headers.present > 0
+  ) {
+    confidence += 3;
+  }
+
+  if (
+    rdap &&
+    rdap.available
+  ) {
+    confidence += 3;
+  }
+
+  confidence =
+    Math.min(
+      95,
+      confidence
+    );
+
+  return {
+    score,
+    risk,
+    confidence,
+    reasons
+  };
 }
 
-/* ---------------------------------------------------------
-   MAIN REPORT BUILDER
---------------------------------------------------------- */
 
-function buildReport(data) {
+/* =========================================================
+   DYNAMIC CATEGORY SECTIONS
+========================================================= */
+
+function buildCategorySections(page) {
+  const sections = [];
+
+  const s =
+    page.signals;
+
+  /* -------------------------------------------------------
+     FINANCIAL
+  ------------------------------------------------------- */
+
+  if (
+    s.crypto ||
+    s.trading ||
+    s.investment
+  ) {
+    sections.push({
+      title:
+        "💰 FINANCIAL ACTIVITY",
+
+      lines: [
+        `• Crypto/Token: ${
+          s.crypto
+            ? "⚠️ DETECTED"
+            : "❓ NOT VERIFIED"
+        }`,
+
+        `• Trading: ${
+          s.trading
+            ? "⚠️ DETECTED"
+            : "❓ NOT VERIFIED"
+        }`,
+
+        `• Investment Claims: ${
+          s.investment
+            ? "⚠️ DETECTED"
+            : "❓ NOT VERIFIED"
+        }`,
+
+        "• Payment: ❓ NOT VERIFIED",
+
+        "",
+
+        "⚠️ Note:",
+
+        "Financial activity does not by itself prove fraud.",
+
+        "Verify the service, operators and transaction terms before sending money or connecting a wallet."
+      ]
+    });
+  }
+
+  /* -------------------------------------------------------
+     ADULT
+  ------------------------------------------------------- */
+
+  if (s.adult) {
+    sections.push({
+      title:
+        "🔞 CONTENT CATEGORY",
+
+      lines: [
+        "• Adult Content: ⚠️ DETECTED",
+        "• Age Restriction: ⚠️ PRESENT"
+      ]
+    });
+  }
+
+  /* -------------------------------------------------------
+     GAMBLING
+  ------------------------------------------------------- */
+
+  if (s.gambling) {
+    sections.push({
+      title:
+        "🎰 GAMBLING ACTIVITY",
+
+      lines: [
+        "• Gambling: ⚠️ DETECTED",
+        "• Betting: ⚠️ DETECTED",
+        `• Payment/Deposit: ${
+          s.payment
+            ? "⚠️ DETECTED"
+            : "❓ NOT VERIFIED"
+        }`
+      ]
+    });
+  }
+
+  /* -------------------------------------------------------
+     COMMERCE
+  ------------------------------------------------------- */
+
+  if (
+    s.shopping ||
+    s.payment
+  ) {
+    sections.push({
+      title:
+        "🛒 COMMERCE ACTIVITY",
+
+      lines: [
+        `• Products/Shopping: ${
+          s.shopping
+            ? "⚠️ DETECTED"
+            : "❓ NOT VERIFIED"
+        }`,
+
+        `• Checkout: ${
+          s.payment
+            ? "⚠️ DETECTED"
+            : "❓ NOT VERIFIED"
+        }`,
+
+        `• Payment: ${
+          s.payment
+            ? "⚠️ DETECTED"
+            : "❓ NOT VERIFIED"
+        }`
+      ]
+    });
+  }
+
+  return sections;
+}
+
+
+/* =========================================================
+   USER GUIDANCE
+========================================================= */
+
+function buildGuidance(risk, page) {
+  let browsing =
+    "🟢 Generally OK";
+
+  let personalData =
+    "🟢 Normal Caution";
+
+  let account =
+    "🟢 Verify Normally";
+
+  let payment =
+    "🟡 Verify Before Paying";
+
+  if (risk === "MEDIUM") {
+    browsing =
+      "🟡 Use Caution";
+
+    personalData =
+      "🟡 Verify First";
+
+    account =
+      "🟠 Verify Carefully";
+
+    payment =
+      "🟠 Verify Before Paying";
+  }
+
+  if (risk === "HIGH") {
+    browsing =
+      "🔴 High Caution";
+
+    personalData =
+      "🔴 Avoid Sharing Sensitive Data";
+
+    account =
+      "🔴 Verify Independently";
+
+    payment =
+      "🔴 Avoid Payment Until Verified";
+  }
+
+  if (
+    page.signals.crypto ||
+    page.signals.trading ||
+    page.signals.investment
+  ) {
+    payment =
+      risk === "HIGH"
+        ? "🔴 Avoid Payment Until Verified"
+        : "🟠 Verify Before Sending Money";
+  }
+
+  return {
+    browsing,
+    personalData,
+    account,
+    payment
+  };
+}
+
+
+/* =========================================================
+   TRUST REASONING
+========================================================= */
+
+function buildTrustReasoning(data, riskResult) {
+  const lines = [];
+
   const {
-    requestedUrl,
+    finalResponse,
     finalUrl,
-    response,
-    tls,
-    security,
+    headers,
+    certificate,
     domain,
     page,
     ads,
-    dnsInfo,
-    rdap,
-    risk,
-    certificate
+    rdap
   } = data;
 
-  const lines = [
-    '🛡️ WebSafe Research AI',
-    '',
-    `🌐 Website: ${requestedUrl}`,
-    ''
-  ];
+  const protocol =
+    new URL(finalUrl).protocol;
 
-  lines.push(
-    `🛡️ Risk: ${risk.risk}`,
-    `🎯 Confidence: ${risk.confidence}%`,
-    `📊 Risk Score: ${risk.score}/100`,
-    '',
-    '🔎 KEY FINDINGS',
-    `• HTTPS: ${
-      requestedUrl.startsWith('https://')
-        ? '✅ PASS'
-        : '❌ NOT SECURE'
-    }`,
-    `• HTTP Status: ${
-      response
-        ? response.statusCode
-        : '❓ UNKNOWN'
-    }`,
-    `• Redirects: ${
-      response && response.redirects.length === 0
-        ? '✅ NONE'
-        : response
-          ? `⚠️ ${response.redirects.length}`
-          : '❓ UNKNOWN'
-    }`,
-    `• SSL/TLS: ${
-      tls.available
-        ? tls.verified
-          ? '✅ VERIFIED'
-          : '❌ FAILED'
-        : '❓ NOT AVAILABLE'
-    }`
-  );
-
-  if (tls.protocol) {
+  if (protocol === "https:") {
     lines.push(
-      `• TLS Protocol: ${tls.protocol}`
+      "• The final website uses HTTPS."
+    );
+  } else {
+    lines.push(
+      "• The final website does not use HTTPS."
+    );
+  }
+
+  if (
+    finalResponse.tls &&
+    finalResponse.tls.authorized === true
+  ) {
+    lines.push(
+      "• TLS certificate verification succeeded."
+    );
+  }
+
+  if (
+    finalResponse.tls &&
+    finalResponse.tls.authorized === false
+  ) {
+    lines.push(
+      "• TLS certificate verification did not succeed."
     );
   }
 
   lines.push(
-    `• Security Headers: ${security.present}/${security.total}`,
-    `• Domain Signals: ${
-      domain.signals.length === 0
-        ? '✅ NO BASIC WARNING'
-        : `⚠️ ${domain.signals.length} WARNING(S)`
-    }`
+    `• The website returned HTTP ${finalResponse.statusCode}.`
   );
+
+  if (
+    domain.warnings.length === 0
+  ) {
+    lines.push(
+      "• No obvious basic domain-structure warning indicators were observed."
+    );
+  }
+
+  if (
+    certificate.available
+  ) {
+    lines.push(
+      "• A public TLS certificate was obtained during the research."
+    );
+  }
 
   lines.push(
-    '',
-    '🏷️ WEBSITE IDENTITY',
-    `• Title: ${
-      page.meta.title || 'Not available'
-    }`,
-    `• Description: ${
-      page.meta.description || 'Not available'
-    }`,
-    `• Classification: ${
-      classifyWebsite(page, finalUrl)
-    }`
+    `• ${headers.present}/6 checked security headers were observed.`
   );
 
-  lines.push(
-    buildContentSection(page)
-  );
+  if (
+    page.signals.crypto ||
+    page.signals.trading ||
+    page.signals.investment
+  ) {
+    lines.push(
+      "• Financial or crypto-related activity was detected and should be verified independently."
+    );
+  }
 
-  lines.push(
-    buildCertificateSection(certificate)
-  );
+  if (
+    ads.suspiciousDetected
+  ) {
+    lines.push(
+      "• Suspicious advertising or warning-style content signals were detected."
+    );
+  }
 
-  lines.push(
-    buildSecurityHeaderSection(security)
-  );
+  if (
+    rdap &&
+    !rdap.available
+  ) {
+    lines.push(
+      "• Public RDAP domain information was not available in this run."
+    );
+  }
 
-  lines.push(
-    buildDnsSection(
-      domain,
-      dnsInfo,
-      rdap
-    )
-  );
-
-  lines.push(
-    buildAdSection(ads)
-  );
-
-  /*
-   * IMPORTANT:
-   * These sections are conditional.
-   * They appear only when relevant activity is detected.
-   */
-
-  lines.push(
-    buildFinancialSection(page)
-  );
-
-  lines.push(
-    buildGamblingSection(page)
-  );
-
-  lines.push(
-    buildAdultSection(page)
-  );
-
-  lines.push(
-    buildCommerceSection(page)
-  );
-
-  lines.push(
-    buildDownloadSection(page)
-  );
-
-  lines.push(
-    buildTrustReasoning(risk)
-  );
-
-  lines.push(
-    buildUserGuidance(page, risk)
-  );
-
-  lines.push(
-    '',
-    '⚠️ IMPORTANT',
-    'AI-generated research assessment — not a guarantee',
-    'that the website is safe or fraudulent.',
-    'Results may change over time. Verify important',
-    'information yourself.',
-    '',
-    '🔐 RESEARCH MODE: PUBLIC / PASSIVE ONLY',
-    '🚫 Hacking: DISABLED',
-    '🚫 Exploitation: DISABLED',
-    '🚫 Unauthorized Access: DISABLED'
-  );
-
-  return lines
-    .filter(line => line !== undefined)
-    .join('\n');
+  return lines;
 }
-/* ---------------------------------------------------------
-   MAIN
---------------------------------------------------------- */
+/* =========================================================
+   REPORT BUILDER
+========================================================= */
+
+function buildReport(data, riskResult) {
+  const {
+    initialUrl,
+    finalUrl,
+    finalResponse,
+    domain,
+    headers,
+    page,
+    ads,
+    certificate,
+    dnsInfo,
+    rdap,
+    redirectChain,
+    infrastructure
+  } = data;
+
+  const categorySections =
+    buildCategorySections(page);
+
+  const guidance =
+    buildGuidance(
+      riskResult.risk,
+      page
+    );
+
+  const trustReasoning =
+    buildTrustReasoning(
+      data,
+      riskResult
+    );
+
+  const lines = [];
+
+  lines.push(
+    "🛡️ WebSafe Research AI"
+  );
+  lines.push("");
+
+  lines.push(
+    `🌐 Website: ${initialUrl}`
+  );
+
+  if (
+    finalUrl !== initialUrl
+  ) {
+    lines.push(
+      `🔗 Final URL: ${finalUrl}`
+    );
+  }
+
+  lines.push("");
+
+  lines.push(
+    `🛡️ Risk: ${riskResult.risk}`
+  );
+
+  lines.push(
+    `🎯 Confidence: ${riskResult.confidence}%`
+  );
+
+  lines.push(
+    `📊 Risk Score: ${riskResult.score}/100`
+  );
+
+  lines.push("");
+
+  /* -------------------------------------------------------
+     KEY FINDINGS
+  ------------------------------------------------------- */
+
+  lines.push(
+    "🔎 KEY FINDINGS"
+  );
+
+  lines.push(
+    `• HTTPS: ${
+      new URL(finalUrl).protocol === "https:"
+        ? "✅ PASS"
+        : "⚠️ NOT USED"
+    }`
+  );
+
+  lines.push(
+    `• HTTP Status: ${finalResponse.statusCode}`
+  );
+
+  lines.push(
+    `• Redirects: ${
+      redirectChain.length > 1
+        ? `⚠️ ${redirectChain.length - 1}`
+        : "✅ NONE"
+    }`
+  );
+
+  lines.push(
+    `• SSL/TLS: ${
+      finalResponse.tls &&
+      finalResponse.tls.authorized === true
+        ? "✅ VERIFIED"
+        : finalResponse.tls
+          ? "⚠️ NOT VERIFIED"
+          : "❓ NOT AVAILABLE"
+    }`
+  );
+
+  lines.push(
+    `• Security Headers: ${headers.present}/${headers.total}`
+  );
+
+  lines.push(
+    `• Domain Signals: ${
+      domain.warnings.length === 0
+        ? "✅ NO BASIC WARNING"
+        : `⚠️ ${domain.warnings.length} WARNING(S)`
+    }`
+  );
+
+  lines.push("");
+
+  /* -------------------------------------------------------
+     WEBSITE IDENTITY
+  ------------------------------------------------------- */
+
+  lines.push(
+    "🏷️ WEBSITE IDENTITY"
+  );
+
+  lines.push(
+    `• Title: ${
+      page.meta.title ||
+      "❓ Not available"
+    }`
+  );
+
+  lines.push(
+    `• Description: ${
+      page.meta.description ||
+      "❓ Not available"
+    }`
+  );
+
+  if (page.meta.ogTitle) {
+    lines.push(
+      `• Open Graph Title: ${page.meta.ogTitle}`
+    );
+  }
+
+  if (page.meta.ogDescription) {
+    lines.push(
+      `• Open Graph Description: ${page.meta.ogDescription}`
+    );
+  }
+
+  lines.push(
+    `• Language: ${
+      page.meta.language ||
+      "❓ Not detected"
+    }`
+  );
+
+  lines.push("");
+
+  /* -------------------------------------------------------
+     CATEGORY SECTIONS
+  ------------------------------------------------------- */
+
+  for (
+    const section of categorySections
+  ) {
+    lines.push(section.title);
+
+    for (
+      const line of section.lines
+    ) {
+      lines.push(line);
+    }
+
+    lines.push("");
+  }
+
+  /* -------------------------------------------------------
+     PAGE CONTENT SIGNALS
+  ------------------------------------------------------- */
+
+  lines.push(
+    "📄 PAGE CONTENT SIGNALS"
+  );
+
+  const detectedSignals =
+    Object.entries(
+      page.signals
+    )
+      .filter(
+        ([, detected]) =>
+          detected
+      )
+      .map(
+        ([name]) => name
+      );
+
+  if (
+    detectedSignals.length === 0
+  ) {
+    lines.push(
+      "• ✅ No checked content warning pattern detected."
+    );
+  } else {
+    lines.push(
+      `• ⚠️ Detected: ${detectedSignals.join(", ")}`
+    );
+  }
+
+  lines.push("");
+
+  /* -------------------------------------------------------
+     ADVERTISEMENT ANALYSIS
+  ------------------------------------------------------- */
+
+  lines.push(
+    "📢 AD & POPUP ANALYSIS"
+  );
+
+  lines.push(
+    `• Advertisements: ${
+      ads.detected
+        ? "⚠️ DETECTED"
+        : "✅ NOT DETECTED"
+    }`
+  );
+
+  lines.push(
+    `• Popup Signals: ${
+      ads.popupDetected
+        ? "⚠️ DETECTED"
+        : "✅ NOT DETECTED"
+    }`
+  );
+
+  lines.push(
+    `• Excessive Ads: ${
+      ads.excessiveAds
+        ? "⚠️ DETECTED"
+        : "✅ NOT DETECTED"
+    }`
+  );
+
+  lines.push(
+    `• Suspicious Ad/Content Signals: ${
+      ads.suspiciousDetected
+        ? "⚠️ DETECTED"
+        : "✅ NOT DETECTED"
+    }`
+  );
+
+  lines.push("");
+
+  /* -------------------------------------------------------
+     CERTIFICATE
+  ------------------------------------------------------- */
+
+  lines.push(
+    "🔐 CERTIFICATE"
+  );
+
+  if (certificate.available) {
+    lines.push(
+      `• Subject: ${
+        certificate.subject ||
+        "❓ Not available"
+      }`
+    );
+
+    lines.push(
+      `• Issuer: ${
+        certificate.issuer ||
+        "❓ Not available"
+      }`
+    );
+
+    lines.push(
+      `• Valid From: ${
+        certificate.validFrom ||
+        "❓ Not available"
+      }`
+    );
+
+    lines.push(
+      `• Valid To: ${
+        certificate.validTo ||
+        "❓ Not available"
+      }`
+    );
+  } else {
+    lines.push(
+      "• ❓ Certificate information not available."
+    );
+  }
+
+  lines.push("");
+
+  /* -------------------------------------------------------
+     SECURITY HEADERS
+  ------------------------------------------------------- */
+
+  lines.push(
+    "🛡️ SECURITY HEADERS"
+  );
+
+  for (
+    const [name, result]
+    of Object.entries(
+      headers.results
+    )
+  ) {
+    lines.push(
+      `  • ${name}: ${
+        result.present
+          ? "✅ Present"
+          : "❌ Missing"
+      }`
+    );
+  }
+
+  lines.push("");
+
+  /* -------------------------------------------------------
+     DOMAIN & DNS
+  ------------------------------------------------------- */
+
+  lines.push(
+    "🌍 DOMAIN & DNS"
+  );
+
+  lines.push(
+    `• Hostname: ${domain.hostname}`
+  );
+
+  lines.push(
+    `• A: ${
+      dnsInfo.A.length
+        ? dnsInfo.A.join(", ")
+        : "❓ Not available"
+    }`
+  );
+
+  lines.push(
+    `• AAAA: ${
+      dnsInfo.AAAA.length
+        ? dnsInfo.AAAA.join(", ")
+        : "❓ Not available"
+    }`
+  );
+
+  lines.push(
+    `• MX: ${
+      dnsInfo.MX.length
+        ? dnsInfo.MX.join(", ")
+        : "❓ Not available"
+    }`
+  );
+
+  lines.push(
+    `• NS: ${
+      dnsInfo.NS.length
+        ? dnsInfo.NS.join(", ")
+        : "❓ Not available"
+    }`
+  );
+
+  if (
+    domain.punycode
+  ) {
+    lines.push(
+      "• Punycode: ⚠️ Detected"
+    );
+  }
+
+  lines.push(
+    `• RDAP: ${
+      rdap.available
+        ? "✅ Available"
+        : "❓ Not available"
+    }`
+  );
+
+  lines.push("");
+
+  /* -------------------------------------------------------
+     INFRASTRUCTURE
+  ------------------------------------------------------- */
+
+  if (
+    infrastructure.cdn.length ||
+    infrastructure.analytics.length ||
+    infrastructure.paymentServices.length
+  ) {
+    lines.push(
+      "🌐 EXTERNAL INFRASTRUCTURE"
+    );
+
+    if (
+      infrastructure.cdn.length
+    ) {
+      lines.push(
+        `• CDN: ${infrastructure.cdn.join(", ")}`
+      );
+    }
+
+    if (
+      infrastructure.analytics.length
+    ) {
+      lines.push(
+        `• Analytics: ${infrastructure.analytics.join(", ")}`
+      );
+    }
+
+    if (
+      infrastructure.paymentServices.length
+    ) {
+      lines.push(
+        `• Payment Services: ${infrastructure.paymentServices.join(", ")}`
+      );
+    }
+
+    lines.push("");
+  }
+
+  /* -------------------------------------------------------
+     TRUST REASONING
+  ------------------------------------------------------- */
+
+  lines.push(
+    "🧠 TRUST REASONING"
+  );
+
+  for (
+    const reason of trustReasoning
+  ) {
+    lines.push(reason);
+  }
+
+  lines.push("");
+
+  /* -------------------------------------------------------
+     USER GUIDANCE
+  ------------------------------------------------------- */
+
+  lines.push(
+    "👤 USER GUIDANCE"
+  );
+
+  lines.push(
+    `Browsing: ${guidance.browsing}`
+  );
+
+  lines.push(
+    `Personal Data: ${guidance.personalData}`
+  );
+
+  lines.push(
+    `Account: ${guidance.account}`
+  );
+
+  lines.push(
+    `Payment: ${guidance.payment}`
+  );
+
+  lines.push("");
+
+  /* -------------------------------------------------------
+     IMPORTANT
+  ------------------------------------------------------- */
+
+  lines.push(
+    "⚠️ IMPORTANT"
+  );
+
+  lines.push(
+    "Automated research assessment generated by WebSafe Research AI — not a guarantee that the website is safe or fraudulent."
+  );
+
+  lines.push(
+    "Results may change over time. Verify important information yourself."
+  );
+
+  lines.push("");
+
+  lines.push(
+    "🔐 RESEARCH MODE: PUBLIC / PASSIVE ONLY"
+  );
+
+  lines.push(
+    "🚫 Hacking: DISABLED"
+  );
+
+  lines.push(
+    "🚫 Exploitation: DISABLED"
+  );
+
+  lines.push(
+    "🚫 Unauthorized Access: DISABLED"
+  );
+
+  return lines.join("\n");
+}
+
+
+/* =========================================================
+   MAIN RESEARCH ENGINE
+========================================================= */
 
 async function main() {
-  const input = process.argv[2];
+  const initialUrl =
+    normalizeUrl(input);
 
-  if (!input) {
-    console.error(
-      'Usage: node agent.js <website-url>'
+  const initialDomain =
+    analyzeDomain(initialUrl);
+
+  const redirectResult =
+    await followRedirects(
+      initialUrl
     );
-    process.exit(1);
-  }
 
-  let requestedUrl;
-
-  try {
-    requestedUrl = normalizeUrl(input);
-  } catch (error) {
-    console.error(
-      '❌ Invalid website URL.'
-    );
-    process.exit(1);
-  }
-
-  let response;
-
-  try {
-    response = await fetchWebsite(requestedUrl);
-  } catch (error) {
-    console.error(
-      '❌ Website research failed.'
-    );
-    console.error(
-      `Reason: ${error.message}`
-    );
-    process.exit(1);
-  }
+  const finalResponse =
+    redirectResult.final;
 
   const finalUrl =
-    response.finalUrl || requestedUrl;
+    finalResponse.targetUrl;
 
-  let parsedFinalUrl;
+  const finalDomain =
+    analyzeDomain(finalUrl);
 
-  try {
-    parsedFinalUrl = new URL(finalUrl);
-  } catch {
-    console.error(
-      '❌ Final website URL could not be parsed.'
+  const headers =
+    analyzeSecurityHeaders(
+      finalResponse.headers
     );
-    process.exit(1);
-  }
+
+  const certificate =
+    analyzeCertificate(
+      finalResponse.tls
+    );
+
+  const page =
+    analyzePage(
+      finalResponse.body,
+      finalUrl
+    );
+
+  const categories =
+    detectCategories(page);
+
+  const ads =
+    analyzeAds(
+      finalResponse.body,
+      page.externalDomains
+    );
+
+  const infrastructure =
+    analyzeInfrastructure(
+      finalResponse.headers,
+      page.externalDomains
+    );
 
   const hostname =
-    parsedFinalUrl.hostname.toLowerCase();
+    finalDomain.hostname;
 
-  /*
-   * Run independent public research tasks together.
-   * This keeps the research reasonably fast.
-   */
+  /* -------------------------------------------------------
+     DNS + RDAP IN PARALLEL
+  ------------------------------------------------------- */
 
   const [
     dnsInfo,
@@ -2034,83 +2442,86 @@ async function main() {
     getRdap(hostname)
   ]);
 
-  const page =
-    analyzePage(
-      response.body || '',
-      response.meta || {},
-      finalUrl
+  const data = {
+    initialUrl,
+
+    finalUrl,
+
+    initialDomain,
+
+    finalDomain,
+
+    finalResponse,
+
+    domain:
+      finalDomain,
+
+    headers,
+
+    page,
+
+    categories,
+
+    ads,
+
+    certificate,
+
+    dnsInfo,
+
+    rdap,
+
+    infrastructure,
+
+    redirectChain:
+      redirectResult.chain,
+
+    redirectLimit:
+      redirectResult.redirectLimit
+  };
+
+  const riskResult =
+    calculateRisk(
+      data
     );
-
-  const ads =
-    analyzeAds(
-      response.body || '',
-      finalUrl
-    );
-
-  const security =
-    analyzeSecurityHeaders(
-      response.headers || {}
-    );
-
-  const domain =
-    analyzeDomain(
-      hostname
-    );
-
-  const tls =
-    response.tls || {
-      available: false,
-      verified: false,
-      protocol: null,
-      certificate: null
-    };
-
-  const certificate =
-    analyzeCertificate(tls);
-
-  const risk =
-    calculateRisk({
-      url: finalUrl,
-      response,
-      tls,
-      security,
-      domain,
-      page,
-      ads,
-      dnsInfo,
-      rdap
-    });
 
   const report =
-    buildReport({
-      requestedUrl,
-      finalUrl,
-      response,
-      tls,
-      security,
-      domain,
-      page,
-      ads,
-      dnsInfo,
-      rdap,
-      risk,
-      certificate
-    });
+    buildReport(
+      data,
+      riskResult
+    );
 
   console.log(report);
 }
 
-/* ---------------------------------------------------------
-   START WEBSAFE RESEARCH AI
---------------------------------------------------------- */
+
+/* =========================================================
+   ERROR HANDLING
+========================================================= */
 
 main().catch(error => {
-  console.error('');
   console.error(
-    '❌ WebSafe Research AI stopped unexpectedly.'
+    "🛡️ WebSafe Research AI"
   );
+
+  console.error("");
+
   console.error(
-    `Reason: ${error.message}`
+    "❌ Research failed."
   );
-  process.exit(1);
+
+  console.error(
+    `Reason: ${
+      error && error.message
+        ? error.message
+        : "Unknown error"
+    }`
+  );
+
+  console.error("");
+
+  console.error(
+    "🔐 RESEARCH MODE: PUBLIC / PASSIVE ONLY"
+  );
+
+  process.exitCode = 1;
 });
